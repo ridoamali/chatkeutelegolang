@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -17,9 +19,9 @@ import (
 
 // jadi var for bot token, spreadsheet ID, and credentials file path.  Good practice to define them clearly.
 var (
-	botToken        string // Replace with your actual bot token
-	spreadsheetID   string // Replace with your spreadsheet ID
-	credentialsPath string // Replace with your credentials file path
+	botToken          string // Replace with your actual bot token
+	spreadsheetID     string // Replace with your spreadsheet ID
+	credentialsBase64 string // Replace with your credentials file path
 )
 
 func init() {
@@ -30,17 +32,15 @@ func init() {
 
 	botToken = os.Getenv("BOT_TOKEN")
 	spreadsheetID = os.Getenv("SPREADSHEET_ID")
-	if botToken == "" || spreadsheetID == "" {
-		log.Fatal("BOT_TOKEN or SPREADSHEET_ID is not set in the .env file")
-	}
-	credentialsPath = os.Getenv("CREDENTIALS_PATH")
-	if credentialsPath == "" {
-		log.Fatal("CREDENTIALS_PATH is not set in the .env file")
+	credentialsBase64 := os.Getenv("GOOGLE_CREDENTIALS_BASE64")
+	if botToken == "" || spreadsheetID == "" || credentialsBase64 == "" {
+		log.Fatal("Missing env: BOT_TOKEN, SPREADSHEET_ID, or GOOGLE_CREDENTIALS_BASE64")
 	}
 
 }
 
 func main() {
+
 	// Create a new Telegram Bot API client.
 	bot, err := tgbotapi.NewBotAPI(botToken)
 	if err != nil {
@@ -62,10 +62,50 @@ func main() {
 	updates := bot.GetUpdatesChan(updateConfig)
 
 	// Create a background context.
+
+	// Create Sheets client
 	ctx := context.Background()
+	sheetsService, err := authorizeFromBase64(ctx, credentialsBase64)
+	if err != nil {
+		log.Fatalf("Sheets auth failed: %v", err)
+	}
+
+	// Webhook setup
+	publicURL := os.Getenv("PUBLIC_URL") // e.g. https://mybot.up.railway.app
+	webhookURL := publicURL + "/webhook"
+
+	webhookConfig, err := tgbotapi.NewWebhook(webhookURL)
+	if err != nil {
+		log.Fatalf("Failed to create webhook config: %v", err)
+	}
+	_, err = bot.Request(webhookConfig)
+	if err != nil {
+		log.Fatalf("Failed to set webhook: %v", err)
+	}
+
+	// Listen handler
+	http.HandleFunc("/webhook", func(w http.ResponseWriter, r *http.Request) {
+		update, err := bot.HandleUpdate(r)
+		if err != nil {
+			log.Printf("Error handling update: %v", err)
+			return
+		}
+		if update.Message == nil {
+			return
+		}
+
+		handleMessage(bot, sheetsService, update.Message)
+	})
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	log.Printf("Listening on port %s...", port)
+	log.Fatal(http.ListenAndServe(":"+port, nil))
 
 	// Authorize with Google Sheets API.
-	srv, err := authorize(ctx)
+	srv, err := authorizeFromBase64(ctx, credentialsBase64)
 	if err != nil {
 		log.Fatalf("failed to authorize with Google Sheets: %v", err) // Use log.Fatalf for critical errors
 	}
@@ -119,30 +159,24 @@ func main() {
 		}
 	}
 }
+func handleMessage(bot *tgbotapi.BotAPI, sheetsService *sheets.Service, message *tgbotapi.Message) {
+	// Process the message here
+	// For example, you can extract the text from the message and process it
+	// ...
+}
 
 // authorize function handles Google Sheets API authorization.
-func authorize(ctx context.Context) (*sheets.Service, error) {
-	// Read the credentials file.  Error handling is crucial.
-	credsJson := os.Getenv("GOOGLE_CREDENTIALS")
-	if credsJson == "" {
-		return nil, fmt.Errorf("GOOGLE_CREDENTIALS not set in .env")
-	}
-
-	// Parse the credentials JSON.
-	config, err := google.JWTConfigFromJSON([]byte(credsJson), sheets.SpreadsheetsScope)
+func authorizeFromBase64(ctx context.Context, base64Creds string) (*sheets.Service, error) {
+	decoded, err := base64.StdEncoding.DecodeString(base64Creds)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse GOOGLE_CREDENTIALS JSON: %w", err)
+		return nil, fmt.Errorf("base64 decode failed: %w", err)
 	}
-
-	// Create an HTTP client.
+	config, err := google.JWTConfigFromJSON(decoded, sheets.SpreadsheetsScope)
+	if err != nil {
+		return nil, fmt.Errorf("JWT config from JSON failed: %w", err)
+	}
 	client := config.Client(ctx)
-	// Create the Google Sheets service.
-	srv, err := sheets.NewService(ctx, option.WithHTTPClient(client))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Sheets service: %w", err)
-	}
-
-	return srv, nil
+	return sheets.NewService(ctx, option.WithHTTPClient(client))
 }
 
 // appendData function appends data to the Google Sheet.
