@@ -25,10 +25,8 @@ var (
 )
 
 func init() {
-	err := godotenv.Load()
-	if err != nil {
-		log.Fatalf("Error loading .env file: %v", err)
-	}
+	// Load .env if available (for local development)
+	_ = godotenv.Load()
 
 	botToken = os.Getenv("BOT_TOKEN")
 	spreadsheetID = os.Getenv("SPREADSHEET_ID")
