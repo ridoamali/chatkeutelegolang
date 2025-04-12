@@ -138,7 +138,7 @@ func handleUpdate(bot *tgbotapi.BotAPI, srv *sheets.Service, update tgbotapi.Upd
 		)
 		bot.Send(tgbotapi.NewMessage(chatId, response))
 	} else {
-		bot.Send(tgbotapi.NewMessage(chatId, "Format salah🙅🏻‍♂️. Gunakan: Nominal, Kategori, Keterangan"))
+		bot.Send(tgbotapi.NewMessage(chatId, "Format salah🙅🏻‍♂️. Gunakan: Nominal, Kategori, Keterangan. \n Contoh: 10rb, Makanan, Makan Siang di Kantin"))
 	}
 }
 
@@ -176,6 +176,7 @@ func appendData(srv *sheets.Service, nominal int, budget, keterangan string) err
 
 func normalizeNominal(nominal string) int {
 	nominal = strings.ToLower(strings.ReplaceAll(nominal, " ", ""))
+	nominal = strings.ReplaceAll(nominal, ".", "") // remove dot
 	var result int
 	var err error
 
