@@ -25,156 +25,153 @@ var (
 )
 
 func init() {
-	// Load .env if available (for local development)
-	_ = godotenv.Load()
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatalf("Error loading .env file: %v", err)
+	}
 
 	botToken = os.Getenv("BOT_TOKEN")
 	spreadsheetID = os.Getenv("SPREADSHEET_ID")
-	credentialsBase64 := os.Getenv("GOOGLE_CREDENTIALS_BASE64")
-	if botToken == "" || spreadsheetID == "" || credentialsBase64 == "" {
-		log.Fatal("Missing env: BOT_TOKEN, SPREADSHEET_ID, or GOOGLE_CREDENTIALS_BASE64")
+	if botToken == "" || spreadsheetID == "" {
+		log.Fatal("BOT_TOKEN or SPREADSHEET_ID is not set in the .env file")
+	}
+	credentialsBase64 = os.Getenv("GOOGLE_CREDENTIALS_BASE64")
+	if credentialsBase64 == "" {
+		log.Fatal("GOOGLE_CREDENTIALS_BASE64 is not set in the .env file")
 	}
 
 }
 
 func main() {
+	_, err := base64.StdEncoding.DecodeString(credentialsBase64)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	// Create a new Telegram Bot API client.
 	bot, err := tgbotapi.NewBotAPI(botToken)
 	if err != nil {
-		log.Panicf("failed to create bot API client: %v", err) // Use log.Panicf for non-recoverable errors
+		log.Panicf("failed to create bot API client: %v", err)
 	}
 
-	bot.Debug = true // Enable debug mode for more verbose output.  Good for development.
+	bot.Debug = true
 
-	// Delete the existing webhook
-	_, err = bot.Request(tgbotapi.DeleteWebhookConfig{})
-	if err != nil {
-		log.Printf("failed to delete webhook: %v", err)
-	}
-
-	// Create a new update channel.
-	updateConfig := tgbotapi.NewUpdate(0)
-	updateConfig.Timeout = 60
-
-	updates := bot.GetUpdatesChan(updateConfig)
-
-	// Create a background context.
-
-	// Create Sheets client
-	ctx := context.Background()
-	sheetsService, err := authorizeFromBase64(ctx, credentialsBase64)
-	if err != nil {
-		log.Fatalf("Sheets auth failed: %v", err)
-	}
-
-	// Webhook setup
-	publicURL := os.Getenv("PUBLIC_URL") // e.g. https://mybot.up.railway.app
-	webhookURL := publicURL + "/webhook"
-
-	webhookConfig, err := tgbotapi.NewWebhook(webhookURL)
-	if err != nil {
-		log.Fatalf("Failed to create webhook config: %v", err)
-	}
-	_, err = bot.Request(webhookConfig)
-	if err != nil {
-		log.Fatalf("Failed to set webhook: %v", err)
-	}
-
-	// Listen handler
-	http.HandleFunc("/webhook", func(w http.ResponseWriter, r *http.Request) {
-		update, err := bot.HandleUpdate(r)
-		if err != nil {
-			log.Printf("Error handling update: %v", err)
-			return
-		}
-		if update.Message == nil {
-			return
-		}
-
-		handleMessage(bot, sheetsService, update.Message)
-	})
-
+	webhookURL := os.Getenv("WEBHOOK_URL")
 	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-	log.Printf("Listening on port %s...", port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
 
-	// Authorize with Google Sheets API.
-	srv, err := authorizeFromBase64(ctx, credentialsBase64)
+	if webhookURL != "" && port != "" {
+		log.Println("📡 Running in Webhook mode...")
+
+		webhookConfig, err := tgbotapi.NewWebhook(webhookURL)
+		if err != nil {
+			log.Fatalf("Failed to create webhook config: %v", err)
+		}
+
+		_, err = bot.Request(webhookConfig)
+		if err != nil {
+			log.Fatalf("Failed to set webhook: %v", err)
+		}
+
+		info, err := bot.GetWebhookInfo()
+		if err != nil {
+			log.Fatalf("Failed to get webhook info: %v", err)
+		}
+		log.Printf("✅ Webhook set to: %s", info.URL)
+
+		updates := bot.ListenForWebhook("/webhook")
+
+		go func() {
+			log.Printf("🌐 Starting HTTP server on port %s", port)
+			if err := http.ListenAndServe("0.0.0.0:"+port, nil); err != nil {
+				log.Fatalf("Failed to start HTTP server: %v", err)
+			}
+		}()
+
+		handleUpdates(bot, updates)
+	} else {
+		// Polling Mode (Local development)
+		log.Println("🎧 Running in Polling mode...")
+		_, err := bot.Request(tgbotapi.DeleteWebhookConfig{})
+		if err != nil {
+			log.Printf("Failed to delete webhook: %v", err)
+		}
+
+		updateConfig := tgbotapi.NewUpdate(0)
+		updateConfig.Timeout = 60
+		updates := bot.GetUpdatesChan(updateConfig)
+
+		handleUpdates(bot, updates)
+	}
+}
+
+func handleUpdates(bot *tgbotapi.BotAPI, updates tgbotapi.UpdatesChannel) {
+	ctx := context.Background()
+	srv, err := authorize(ctx)
 	if err != nil {
-		log.Fatalf("failed to authorize with Google Sheets: %v", err) // Use log.Fatalf for critical errors
+		log.Fatalf("failed to authorize with Google Sheets: %v", err)
 	}
 
-	// Process updates from Telegram.
 	for update := range updates {
 		if update.Message == nil {
-			continue // Ignore non-message updates.
+			continue
 		}
 
 		chatId := update.Message.Chat.ID
 		text := update.Message.Text
 
-		// Split the message text into parts.
 		parts := strings.Split(text, ",")
 		if len(parts) == 3 {
-			nominalStr := strings.TrimSpace(parts[0]) // Trim spaces from input
+			nominalStr := strings.TrimSpace(parts[0])
 			budget := strings.TrimSpace(parts[1])
 			keterangan := strings.TrimSpace(parts[2])
 
-			// Normalize the nominal value.
 			normalizedNominal := normalizeNominal(nominalStr)
 
-			// Append the data to the Google Sheet.
 			err = appendData(srv, normalizedNominal, budget, keterangan)
 			if err != nil {
 				log.Printf("failed to append data: %v", err)
 				msg := tgbotapi.NewMessage(chatId, "❌Terjadi kesalahan saat menambahkan data.")
-				bot.Send(msg) //check if send was successful
-				continue      // Continue to the next update, don't try to send summary
+				bot.Send(msg)
+				continue
 			}
 
-			// Get the summary.
 			summary := getSummary(srv)
+			response := fmt.Sprintf("✅Data berhasil ditambahkan ke Google Spreadsheet.\nAnda telah memasukkan:\n💰%d\n🎯%s\n📚%s\n\nTotal Nominal: Rp. %d",
+				normalizedNominal, budget, keterangan, summary)
 
-			// Construct the response message.
-			response := fmt.Sprintf("✅Data berhasil ditambahkan ke Google Spreadsheet.\nAnda telah memasukkan: \n💰%d, \n🎯%s, \n📚%s\n\nTotal Nominal: Rp. %d", normalizedNominal, budget, keterangan, summary)
 			msg := tgbotapi.NewMessage(chatId, response)
-			_, err = bot.Send(msg) //check if send was successful
-			if err != nil {
-				log.Printf("failed to send message: %v", err)
-			}
-
+			bot.Send(msg)
 		} else {
-			// Handle invalid input format.
-			msg := tgbotapi.NewMessage(chatId, "Format salah🙅🏻‍♂️. Gunakan: Nominal, Kategori, Keterangan untuk apa")
-			_, err = bot.Send(msg)
-			if err != nil {
-				log.Printf("failed to send message: %v", err)
-			}
+			msg := tgbotapi.NewMessage(chatId, "Format salah🙅🏻‍♂️. Gunakan: Nominal, Kategori, Keterangan")
+			bot.Send(msg)
 		}
 	}
 }
-func handleMessage(bot *tgbotapi.BotAPI, sheetsService *sheets.Service, message *tgbotapi.Message) {
-	// Process the message here
-	// For example, you can extract the text from the message and process it
-	// ...
-}
 
 // authorize function handles Google Sheets API authorization.
-func authorizeFromBase64(ctx context.Context, base64Creds string) (*sheets.Service, error) {
-	decoded, err := base64.StdEncoding.DecodeString(base64Creds)
-	if err != nil {
-		return nil, fmt.Errorf("base64 decode failed: %w", err)
+func authorize(ctx context.Context) (*sheets.Service, error) {
+	// Read the credentials file.  Error handling is crucial.
+	credsJson := os.Getenv("GOOGLE_CREDENTIALS_BASE64")
+	if credsJson == "" {
+		return nil, fmt.Errorf("GOOGLE_CREDENTIALS_BASE64 not set in .env")
 	}
-	config, err := google.JWTConfigFromJSON(decoded, sheets.SpreadsheetsScope)
+	// Parse the credentials JSON.
+
+	decodedCreds, err := base64.StdEncoding.DecodeString(credsJson)
 	if err != nil {
-		return nil, fmt.Errorf("JWT config from JSON failed: %w", err)
+		return nil, fmt.Errorf("failed to decode GOOGLE_CREDENTIALS_BASE64: %w", err)
 	}
+	config, err := google.JWTConfigFromJSON(decodedCreds, sheets.SpreadsheetsScope)
+
+	// Create an HTTP client.
 	client := config.Client(ctx)
-	return sheets.NewService(ctx, option.WithHTTPClient(client))
+	// Create the Google Sheets service.
+	srv, err := sheets.NewService(ctx, option.WithHTTPClient(client))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Sheets service: %w", err)
+	}
+
+	return srv, nil
 }
 
 // appendData function appends data to the Google Sheet.
