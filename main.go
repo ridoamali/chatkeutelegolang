@@ -25,21 +25,21 @@ var (
 )
 
 func init() {
-	err := godotenv.Load()
-	if err != nil {
-		log.Fatalf("Error loading .env file: %v", err)
+	// Only load .env if running locally
+	if os.Getenv("RAILWAY_ENVIRONMENT") == "" {
+		err := godotenv.Load()
+		if err != nil {
+			log.Println("Skipping .env loading, not found.")
+		}
 	}
 
 	botToken = os.Getenv("BOT_TOKEN")
 	spreadsheetID = os.Getenv("SPREADSHEET_ID")
-	if botToken == "" || spreadsheetID == "" {
-		log.Fatal("BOT_TOKEN or SPREADSHEET_ID is not set in the .env file")
-	}
 	credentialsBase64 = os.Getenv("GOOGLE_CREDENTIALS_BASE64")
-	if credentialsBase64 == "" {
-		log.Fatal("GOOGLE_CREDENTIALS_BASE64 is not set in the .env file")
-	}
 
+	if botToken == "" || spreadsheetID == "" || credentialsBase64 == "" {
+		log.Fatal("One or more required environment variables are not set.")
+	}
 }
 
 func main() {
