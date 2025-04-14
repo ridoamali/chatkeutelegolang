@@ -165,7 +165,8 @@ func handleUpdate(bot *tgbotapi.BotAPI, srv *sheets.Service, update tgbotapi.Upd
 				"/monthly - Tampilkan pengeluaran bulan ini\n"+
 				"/last - Tampilkan data terakhir\n"+
 				"/remove - Hapus entri terakhir\n"+
-				"/edit - Edit entri berdasarkan nomor")
+				"/edit - Edit entri berdasarkan nomor\n"+
+				"/history - Tampilkan 5 transaksi terakhir")
 			bot.Send(msg)
 			return
 
@@ -182,7 +183,8 @@ func handleUpdate(bot *tgbotapi.BotAPI, srv *sheets.Service, update tgbotapi.Upd
 				"   /monthly - Tampilkan pengeluaran bulan ini\n"+
 				"   /last - Tampilkan data terakhir\n"+
 				"   /remove - Hapus entri terakhir\n"+
-				"   /edit <nomor> - Edit entri berdasarkan nomor\n\n"+
+				"   /edit <nomor> - Edit entri berdasarkan nomor\n"+
+				"   /history - Tampilkan 5 transaksi terakhir\n\n"+
 				"3. Format nominal:\n"+
 				"   - 10rb = 10.000\n"+
 				"   - 1jt = 1.000.000\n"+
@@ -190,7 +192,7 @@ func handleUpdate(bot *tgbotapi.BotAPI, srv *sheets.Service, update tgbotapi.Upd
 			bot.Send(msg)
 			return
 
-		case strings.HasPrefix(text, "/edit "):
+		case text == "/edit " + text:
 			// Extract row number from command
 			rowNumberStr := strings.TrimPrefix(text, "/edit ")
 			rowNumber, err := strconv.Atoi(rowNumberStr)
@@ -268,6 +270,17 @@ func handleUpdate(bot *tgbotapi.BotAPI, srv *sheets.Service, update tgbotapi.Upd
 			}
 
 			msg := tgbotapi.NewMessage(chatId, fmt.Sprintf("✅ Data berhasil dihapus:\n%s", lastEntry))
+			bot.Send(msg)
+			return
+
+		case text == "/history":
+			history, err := getLastFiveEntries(srv)
+			if err != nil {
+				msg := tgbotapi.NewMessage(chatId, "❌ Gagal mengambil riwayat transaksi")
+				bot.Send(msg)
+				return
+			}
+			msg := tgbotapi.NewMessage(chatId, history)
 			bot.Send(msg)
 			return
 
@@ -559,4 +572,58 @@ func getEntryByNumber(srv *sheets.Service, rowNumber int) (string, error) {
 	keterangan := fmt.Sprintf("%v", row[4])
 
 	return fmt.Sprintf("📅%s - 💰%s | 🎯%s | 📚%s", date, nominal, budget, keterangan), nil
+}
+
+func getLastFiveEntries(srv *sheets.Service) (string, error) {
+	resp, err := srv.Spreadsheets.Values.Get(spreadsheetID, "A:E").Do()
+	if err != nil {
+		return "", fmt.Errorf("failed to get entries: %w", err)
+	}
+
+	if resp == nil || resp.Values == nil || len(resp.Values) < 2 {
+		return "Belum ada data yang dimasukkan", nil
+	}
+
+	// Get the last 5 entries (skip header row)
+	startIdx := len(resp.Values) - 5
+	if startIdx < 1 {
+		startIdx = 1
+	}
+	entries := resp.Values[startIdx:]
+
+	var result strings.Builder
+	result.WriteString("🧾 5 Transaksi Terakhir:\n\n")
+
+	for i, row := range entries {
+		if len(row) < 5 {
+			continue
+		}
+
+		nominal := fmt.Sprintf("%v", row[2])
+		budget := fmt.Sprintf("%v", row[3])
+		keterangan := fmt.Sprintf("%v", row[4])
+
+		// Format nominal with thousand separator
+		nominalInt, _ := strconv.Atoi(nominal)
+		formattedNominal := formatRupiah(nominalInt)
+
+		result.WriteString(fmt.Sprintf("%d. Rp %s - %s - %s\n", i+1, formattedNominal, budget, keterangan))
+	}
+
+	return result.String(), nil
+}
+
+func formatRupiah(nominal int) string {
+	str := strconv.Itoa(nominal)
+	var result strings.Builder
+	length := len(str)
+
+	for i := 0; i < length; i++ {
+		if (length-i)%3 == 0 && i != 0 {
+			result.WriteString(".")
+		}
+		result.WriteByte(str[i])
+	}
+
+	return result.String()
 }
