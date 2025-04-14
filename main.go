@@ -118,6 +118,64 @@ func handleUpdate(bot *tgbotapi.BotAPI, srv *sheets.Service, update tgbotapi.Upd
 
 	chatId := update.Message.Chat.ID
 	text := update.Message.Text
+
+	// Handle commands
+	if strings.HasPrefix(text, "/") {
+		switch text {
+		case "/start":
+			msg := tgbotapi.NewMessage(chatId, "👋 Hai! Saya adalah bot pencatat keuangan.\n\n"+
+				"📝 Untuk mencatat pengeluaran, kirim dalam format:\n"+
+				"Nominal, Kategori, Keterangan\n"+
+				"Contoh: 10rb, Makanan, Makan Siang di Kantin\n\n"+
+				"📋 Perintah yang tersedia:\n"+
+				"/help - Tampilkan bantuan\n"+
+				"/summary - Tampilkan total pengeluaran\n"+
+				"/last - Tampilkan data terakhir")
+			bot.Send(msg)
+			return
+
+		case "/help":
+			msg := tgbotapi.NewMessage(chatId, "📋 Cara menggunakan bot:\n\n"+
+				"1. Untuk mencatat pengeluaran:\n"+
+				"   Kirim dalam format: Nominal, Kategori, Keterangan\n"+
+				"   Contoh: 10rb, Makanan, Makan Siang di Kantin\n\n"+
+				"2. Perintah yang tersedia:\n"+
+				"   /start - Mulai bot\n"+
+				"   /help - Tampilkan bantuan ini\n"+
+				"   /summary - Tampilkan total pengeluaran\n"+
+				"   /last - Tampilkan data terakhir\n\n"+
+				"3. Format nominal:\n"+
+				"   - 10rb = 10.000\n"+
+				"   - 1jt = 1.000.000\n"+
+				"   - 100k = 100.000")
+			bot.Send(msg)
+			return
+
+		case "/summary":
+			summary := getSummary(srv)
+			msg := tgbotapi.NewMessage(chatId, fmt.Sprintf("📊 Total pengeluaran saat ini: Rp. %d", summary))
+			bot.Send(msg)
+			return
+
+		case "/last":
+			lastEntry, err := getLastEntry(srv)
+			if err != nil {
+				msg := tgbotapi.NewMessage(chatId, "❌ Gagal mengambil data terakhir")
+				bot.Send(msg)
+				return
+			}
+			msg := tgbotapi.NewMessage(chatId, lastEntry)
+			bot.Send(msg)
+			return
+
+		default:
+			msg := tgbotapi.NewMessage(chatId, "❌ Perintah tidak dikenali. Gunakan /help untuk melihat daftar perintah yang tersedia")
+			bot.Send(msg)
+			return
+		}
+	}
+
+	// Handle data input
 	parts := strings.Split(text, ",")
 	if len(parts) == 3 {
 		nominalStr := strings.TrimSpace(parts[0])
@@ -133,12 +191,12 @@ func handleUpdate(bot *tgbotapi.BotAPI, srv *sheets.Service, update tgbotapi.Upd
 
 		summary := getSummary(srv)
 		response := fmt.Sprintf(
-			"✅Data berhasil ditambahkan ke Google Spreadsheet.\nAnda telah memasukkan:\n💰%d\n🎯%s\n📚%s\n\nTotal Nominal: Rp. %d",
+			"✅Data berhasil ditambahkan ke Google Spreadsheet.\nKamu telah memasukkan:\n💰%d\n🎯%s\n📚%s\n\nTotal Nominal: Rp. %d",
 			normalizedNominal, budget, keterangan, summary,
 		)
 		bot.Send(tgbotapi.NewMessage(chatId, response))
 	} else {
-		bot.Send(tgbotapi.NewMessage(chatId, "Format salah🙅🏻‍♂️. Gunakan: Nominal, Kategori, Keterangan. \n Contoh: 10rb, Makanan, Makan Siang di Kantin"))
+		bot.Send(tgbotapi.NewMessage(chatId, "Format salah🙅🏻‍♂️. Gunakan: Nominal, Kategori, Keterangan. \nContoh: 10rb, Makanan, Makan Siang di Kantin\n\nGunakan /help untuk melihat bantuan lengkap"))
 	}
 }
 
@@ -224,4 +282,27 @@ func getSummary(srv *sheets.Service) int {
 		}
 	}
 	return total
+}
+
+func getLastEntry(srv *sheets.Service) (string, error) {
+	resp, err := srv.Spreadsheets.Values.Get(spreadsheetID, "A:D").Do()
+	if err != nil {
+		return "", fmt.Errorf("failed to get last entry: %w", err)
+	}
+
+	if resp == nil || resp.Values == nil || len(resp.Values) < 2 {
+		return "Belum ada data yang dimasukkan", nil
+	}
+
+	lastRow := resp.Values[len(resp.Values)-1]
+	if len(lastRow) < 4 {
+		return "Format data tidak valid", nil
+	}
+
+	rowNum := fmt.Sprintf("%v", lastRow[0])
+	nominal := fmt.Sprintf("%v", lastRow[1])
+	budget := fmt.Sprintf("%v", lastRow[2])
+	keterangan := fmt.Sprintf("%v", lastRow[3])
+
+	return fmt.Sprintf("🕘 Data terakhir: #%s - 💰%s | 🎯%s | 📚%s", rowNum, nominal, budget, keterangan), nil
 }
