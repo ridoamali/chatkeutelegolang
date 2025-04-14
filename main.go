@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/joho/godotenv"
@@ -130,6 +131,8 @@ func handleUpdate(bot *tgbotapi.BotAPI, srv *sheets.Service, update tgbotapi.Upd
 				"📋 Perintah yang tersedia:\n"+
 				"/help - Tampilkan bantuan\n"+
 				"/summary - Tampilkan total pengeluaran\n"+
+				"/weekly - Tampilkan pengeluaran minggu ini\n"+
+				"/monthly - Tampilkan pengeluaran bulan ini\n"+
 				"/last - Tampilkan data terakhir\n"+
 				"/remove - Hapus entri terakhir")
 			bot.Send(msg)
@@ -144,6 +147,8 @@ func handleUpdate(bot *tgbotapi.BotAPI, srv *sheets.Service, update tgbotapi.Upd
 				"   /start - Mulai bot\n"+
 				"   /help - Tampilkan bantuan ini\n"+
 				"   /summary - Tampilkan total pengeluaran\n"+
+				"   /weekly - Tampilkan pengeluaran minggu ini\n"+
+				"   /monthly - Tampilkan pengeluaran bulan ini\n"+
 				"   /last - Tampilkan data terakhir\n"+
 				"   /remove - Hapus entri terakhir\n\n"+
 				"3. Format nominal:\n"+
@@ -156,6 +161,28 @@ func handleUpdate(bot *tgbotapi.BotAPI, srv *sheets.Service, update tgbotapi.Upd
 		case "/summary":
 			summary := getSummary(srv)
 			msg := tgbotapi.NewMessage(chatId, fmt.Sprintf("📊 Total pengeluaran saat ini: Rp. %d", summary))
+			bot.Send(msg)
+			return
+
+		case "/weekly":
+			weeklySummary, err := getWeeklySummary(srv)
+			if err != nil {
+				msg := tgbotapi.NewMessage(chatId, "❌ Gagal mengambil data pengeluaran mingguan")
+				bot.Send(msg)
+				return
+			}
+			msg := tgbotapi.NewMessage(chatId, weeklySummary)
+			bot.Send(msg)
+			return
+
+		case "/monthly":
+			monthlySummary, err := getMonthlySummary(srv)
+			if err != nil {
+				msg := tgbotapi.NewMessage(chatId, "❌ Gagal mengambil data pengeluaran bulanan")
+				bot.Send(msg)
+				return
+			}
+			msg := tgbotapi.NewMessage(chatId, monthlySummary)
 			bot.Send(msg)
 			return
 
@@ -246,7 +273,10 @@ func appendData(srv *sheets.Service, nominal int, budget, keterangan string) err
 		nextRow = len(resp.Values) + 1
 	}
 
-	values := [][]interface{}{{nextRow, nominal, budget, keterangan}}
+	// Get current date in YYYY-MM-DD format
+	currentDate := time.Now().Format("2006-01-02")
+
+	values := [][]interface{}{{nextRow, currentDate, nominal, budget, keterangan}}
 	valueRange := &sheets.ValueRange{Values: values}
 
 	_, err = srv.Spreadsheets.Values.Append(spreadsheetID, "A1", valueRange).ValueInputOption("USER_ENTERED").Do()
@@ -284,7 +314,7 @@ func normalizeNominal(nominal string) int {
 }
 
 func getSummary(srv *sheets.Service) int {
-	resp, err := srv.Spreadsheets.Values.Get(spreadsheetID, "B:B").Do()
+	resp, err := srv.Spreadsheets.Values.Get(spreadsheetID, "C:C").Do()
 	if err != nil {
 		log.Printf("failed to get summary: %v", err)
 		return 0
@@ -306,7 +336,7 @@ func getSummary(srv *sheets.Service) int {
 }
 
 func getLastEntry(srv *sheets.Service) (string, error) {
-	resp, err := srv.Spreadsheets.Values.Get(spreadsheetID, "A:D").Do()
+	resp, err := srv.Spreadsheets.Values.Get(spreadsheetID, "A:E").Do()
 	if err != nil {
 		return "", fmt.Errorf("failed to get last entry: %w", err)
 	}
@@ -316,16 +346,109 @@ func getLastEntry(srv *sheets.Service) (string, error) {
 	}
 
 	lastRow := resp.Values[len(resp.Values)-1]
-	if len(lastRow) < 4 {
+	if len(lastRow) < 5 {
 		return "Format data tidak valid", nil
 	}
 
 	rowNum := fmt.Sprintf("%v", lastRow[0])
-	nominal := fmt.Sprintf("%v", lastRow[1])
-	budget := fmt.Sprintf("%v", lastRow[2])
-	keterangan := fmt.Sprintf("%v", lastRow[3])
+	date := fmt.Sprintf("%v", lastRow[1])
+	nominal := fmt.Sprintf("%v", lastRow[2])
+	budget := fmt.Sprintf("%v", lastRow[3])
+	keterangan := fmt.Sprintf("%v", lastRow[4])
 
-	return fmt.Sprintf("🕘 Data terakhir: #%s - 💰%s | 🎯%s | 📚%s", rowNum, nominal, budget, keterangan), nil
+	return fmt.Sprintf("🕘 Data terakhir: #%s - 📅%s - 💰%s | 🎯%s | 📚%s", rowNum, date, nominal, budget, keterangan), nil
+}
+
+func getWeeklySummary(srv *sheets.Service) (string, error) {
+	resp, err := srv.Spreadsheets.Values.Get(spreadsheetID, "A:E").Do()
+	if err != nil {
+		return "", fmt.Errorf("failed to get weekly summary: %w", err)
+	}
+
+	if resp == nil || resp.Values == nil || len(resp.Values) < 2 {
+		return "Belum ada data yang dimasukkan", nil
+	}
+
+	now := time.Now()
+	weekStart := now.AddDate(0, 0, -int(now.Weekday()))
+	weekEnd := weekStart.AddDate(0, 0, 6)
+
+	total := 0
+	var entries []string
+
+	for _, row := range resp.Values[1:] { // Skip header
+		if len(row) < 5 {
+			continue
+		}
+
+		dateStr := fmt.Sprintf("%v", row[1])
+		date, err := time.Parse("2006-01-02", dateStr)
+		if err != nil {
+			continue
+		}
+
+		if date.After(weekStart) && date.Before(weekEnd.AddDate(0, 0, 1)) {
+			nominal, _ := strconv.Atoi(fmt.Sprintf("%v", row[2]))
+			total += nominal
+			entries = append(entries, fmt.Sprintf("📅%s - 💰%v | 🎯%v | 📚%v", dateStr, row[2], row[3], row[4]))
+		}
+	}
+
+	if len(entries) == 0 {
+		return "Tidak ada pengeluaran minggu ini", nil
+	}
+
+	result := fmt.Sprintf("📊 Pengeluaran Minggu Ini (Rp. %d):\n\n", total)
+	for _, entry := range entries {
+		result += entry + "\n"
+	}
+	return result, nil
+}
+
+func getMonthlySummary(srv *sheets.Service) (string, error) {
+	resp, err := srv.Spreadsheets.Values.Get(spreadsheetID, "A:E").Do()
+	if err != nil {
+		return "", fmt.Errorf("failed to get monthly summary: %w", err)
+	}
+
+	if resp == nil || resp.Values == nil || len(resp.Values) < 2 {
+		return "Belum ada data yang dimasukkan", nil
+	}
+
+	now := time.Now()
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.Local)
+	monthEnd := monthStart.AddDate(0, 1, -1)
+
+	total := 0
+	var entries []string
+
+	for _, row := range resp.Values[1:] { // Skip header
+		if len(row) < 5 {
+			continue
+		}
+
+		dateStr := fmt.Sprintf("%v", row[1])
+		date, err := time.Parse("2006-01-02", dateStr)
+		if err != nil {
+			continue
+		}
+
+		if date.After(monthStart.AddDate(0, 0, -1)) && date.Before(monthEnd.AddDate(0, 0, 1)) {
+			nominal, _ := strconv.Atoi(fmt.Sprintf("%v", row[2]))
+			total += nominal
+			entries = append(entries, fmt.Sprintf("📅%s - 💰%v | 🎯%v | 📚%v", dateStr, row[2], row[3], row[4]))
+		}
+	}
+
+	if len(entries) == 0 {
+		return "Tidak ada pengeluaran bulan ini", nil
+	}
+
+	result := fmt.Sprintf("📊 Pengeluaran Bulan Ini (Rp. %d):\n\n", total)
+	for _, entry := range entries {
+		result += entry + "\n"
+	}
+	return result, nil
 }
 
 func removeLastEntry(srv *sheets.Service) error {
@@ -339,7 +462,7 @@ func removeLastEntry(srv *sheets.Service) error {
 	}
 
 	lastRow := len(resp.Values)
-	rangeToClear := fmt.Sprintf("A%d:D%d", lastRow, lastRow)
+	rangeToClear := fmt.Sprintf("A%d:E%d", lastRow, lastRow)
 
 	// Create a clear request
 	clearRequest := &sheets.ClearValuesRequest{}
