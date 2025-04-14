@@ -273,8 +273,8 @@ func appendData(srv *sheets.Service, nominal int, budget, keterangan string) err
 		nextRow = len(resp.Values) + 1
 	}
 
-	// Get current date in YYYY-MM-DD format
-	currentDate := time.Now().Format("2006-01-02")
+	// Get current date in DD-MM-YYYY format
+	currentDate := time.Now().Format("02-01-2006")
 
 	values := [][]interface{}{{nextRow, currentDate, nominal, budget, keterangan}}
 	valueRange := &sheets.ValueRange{Values: values}
@@ -382,7 +382,7 @@ func getWeeklySummary(srv *sheets.Service) (string, error) {
 		}
 
 		dateStr := fmt.Sprintf("%v", row[1])
-		date, err := time.Parse("2006-01-02", dateStr)
+		date, err := time.Parse("02-01-2006", dateStr)
 		if err != nil {
 			continue
 		}
@@ -428,7 +428,7 @@ func getMonthlySummary(srv *sheets.Service) (string, error) {
 		}
 
 		dateStr := fmt.Sprintf("%v", row[1])
-		date, err := time.Parse("2006-01-02", dateStr)
+		date, err := time.Parse("02-01-2006", dateStr)
 		if err != nil {
 			continue
 		}
