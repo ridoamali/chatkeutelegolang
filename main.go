@@ -24,6 +24,7 @@ var (
 	spreadsheetID     string
 	credentialsBase64 string
 	mode              string
+	editingState      = make(map[int64]int) // Map to store which entry user is editing
 )
 
 func init() {
@@ -120,10 +121,39 @@ func handleUpdate(bot *tgbotapi.BotAPI, srv *sheets.Service, update tgbotapi.Upd
 	chatId := update.Message.Chat.ID
 	text := update.Message.Text
 
+	// Check if user is in editing state
+	if editingRow, isEditing := editingState[chatId]; isEditing {
+		// User is in editing state, expect new data
+		parts := strings.Split(text, ",")
+		if len(parts) == 3 {
+			nominalStr := strings.TrimSpace(parts[0])
+			budget := strings.TrimSpace(parts[1])
+			keterangan := strings.TrimSpace(parts[2])
+
+			normalizedNominal := normalizeNominal(nominalStr)
+			err := editEntry(srv, editingRow, normalizedNominal, budget, keterangan)
+			if err != nil {
+				bot.Send(tgbotapi.NewMessage(chatId, "❌ Gagal mengedit data."))
+				delete(editingState, chatId)
+				return
+			}
+
+			// Show the edited entry
+			editedEntry, _ := getEntryByNumber(srv, editingRow)
+			msg := tgbotapi.NewMessage(chatId, fmt.Sprintf("✅ Data berhasil diedit:\n%s", editedEntry))
+			bot.Send(msg)
+			delete(editingState, chatId)
+			return
+		} else {
+			bot.Send(tgbotapi.NewMessage(chatId, "Format salah🙅🏻‍♂️. Gunakan: Nominal, Kategori, Keterangan\nContoh: 10rb, Makanan, Makan Siang di Kantin"))
+			return
+		}
+	}
+
 	// Handle commands
 	if strings.HasPrefix(text, "/") {
-		switch text {
-		case "/start":
+		switch {
+		case text == "/start":
 			msg := tgbotapi.NewMessage(chatId, "👋 Hai! Saya adalah bot pencatat keuangan.\n\n"+
 				"📝 Untuk mencatat pengeluaran, kirim dalam format:\n"+
 				"Nominal, Kategori, Keterangan\n"+
@@ -134,11 +164,12 @@ func handleUpdate(bot *tgbotapi.BotAPI, srv *sheets.Service, update tgbotapi.Upd
 				"/weekly - Tampilkan pengeluaran minggu ini\n"+
 				"/monthly - Tampilkan pengeluaran bulan ini\n"+
 				"/last - Tampilkan data terakhir\n"+
-				"/remove - Hapus entri terakhir")
+				"/remove - Hapus entri terakhir\n"+
+				"/edit - Edit entri berdasarkan nomor")
 			bot.Send(msg)
 			return
 
-		case "/help":
+		case text == "/help":
 			msg := tgbotapi.NewMessage(chatId, "📋 Cara menggunakan bot:\n\n"+
 				"1. Untuk mencatat pengeluaran:\n"+
 				"   Kirim dalam format: Nominal, Kategori, Keterangan\n"+
@@ -150,7 +181,8 @@ func handleUpdate(bot *tgbotapi.BotAPI, srv *sheets.Service, update tgbotapi.Upd
 				"   /weekly - Tampilkan pengeluaran minggu ini\n"+
 				"   /monthly - Tampilkan pengeluaran bulan ini\n"+
 				"   /last - Tampilkan data terakhir\n"+
-				"   /remove - Hapus entri terakhir\n\n"+
+				"   /remove - Hapus entri terakhir\n"+
+				"   /edit <nomor> - Edit entri berdasarkan nomor\n\n"+
 				"3. Format nominal:\n"+
 				"   - 10rb = 10.000\n"+
 				"   - 1jt = 1.000.000\n"+
@@ -158,13 +190,36 @@ func handleUpdate(bot *tgbotapi.BotAPI, srv *sheets.Service, update tgbotapi.Upd
 			bot.Send(msg)
 			return
 
-		case "/summary":
+		case strings.HasPrefix(text, "/edit "):
+			// Extract row number from command
+			rowNumberStr := strings.TrimPrefix(text, "/edit ")
+			rowNumber, err := strconv.Atoi(rowNumberStr)
+			if err != nil {
+				bot.Send(tgbotapi.NewMessage(chatId, "❌ Nomor entri tidak valid. Gunakan format: /edit <nomor>"))
+				return
+			}
+
+			// Get the entry to show what will be edited
+			entry, err := getEntryByNumber(srv, rowNumber)
+			if err != nil {
+				bot.Send(tgbotapi.NewMessage(chatId, "❌ Entri tidak ditemukan"))
+				return
+			}
+
+			// Store the row number in editing state
+			editingState[chatId] = rowNumber
+
+			msg := tgbotapi.NewMessage(chatId, fmt.Sprintf("✏️ Edit entri #%d:\n%s\n\nKirim data baru dalam format:\nNominal, Kategori, Keterangan\nContoh: 10rb, Makanan, Makan Siang di Kantin", rowNumber, entry))
+			bot.Send(msg)
+			return
+
+		case text == "/summary":
 			summary := getSummary(srv)
 			msg := tgbotapi.NewMessage(chatId, fmt.Sprintf("📊 Total pengeluaran saat ini: Rp. %d", summary))
 			bot.Send(msg)
 			return
 
-		case "/weekly":
+		case text == "/weekly":
 			weeklySummary, err := getWeeklySummary(srv)
 			if err != nil {
 				msg := tgbotapi.NewMessage(chatId, "❌ Gagal mengambil data pengeluaran mingguan")
@@ -175,7 +230,7 @@ func handleUpdate(bot *tgbotapi.BotAPI, srv *sheets.Service, update tgbotapi.Upd
 			bot.Send(msg)
 			return
 
-		case "/monthly":
+		case text == "/monthly":
 			monthlySummary, err := getMonthlySummary(srv)
 			if err != nil {
 				msg := tgbotapi.NewMessage(chatId, "❌ Gagal mengambil data pengeluaran bulanan")
@@ -186,7 +241,7 @@ func handleUpdate(bot *tgbotapi.BotAPI, srv *sheets.Service, update tgbotapi.Upd
 			bot.Send(msg)
 			return
 
-		case "/last":
+		case text == "/last":
 			lastEntry, err := getLastEntry(srv)
 			if err != nil {
 				msg := tgbotapi.NewMessage(chatId, "❌ Gagal mengambil data terakhir")
@@ -197,7 +252,7 @@ func handleUpdate(bot *tgbotapi.BotAPI, srv *sheets.Service, update tgbotapi.Upd
 			bot.Send(msg)
 			return
 
-		case "/remove":
+		case text == "/remove":
 			lastEntry, err := getLastEntry(srv)
 			if err != nil {
 				msg := tgbotapi.NewMessage(chatId, "❌ Gagal mengambil data terakhir")
@@ -468,4 +523,40 @@ func removeLastEntry(srv *sheets.Service) error {
 	clearRequest := &sheets.ClearValuesRequest{}
 	_, err = srv.Spreadsheets.Values.Clear(spreadsheetID, rangeToClear, clearRequest).Do()
 	return err
+}
+
+func editEntry(srv *sheets.Service, rowNumber int, nominal int, budget, keterangan string) error {
+	// Get current date in DD-MM-YYYY format
+	currentDate := time.Now().Format("02-01-2006")
+
+	// Prepare the range to update (A:E columns of the specified row)
+	rangeToUpdate := fmt.Sprintf("A%d:E%d", rowNumber, rowNumber)
+	values := [][]interface{}{{rowNumber, currentDate, nominal, budget, keterangan}}
+	valueRange := &sheets.ValueRange{Values: values}
+
+	_, err := srv.Spreadsheets.Values.Update(spreadsheetID, rangeToUpdate, valueRange).ValueInputOption("USER_ENTERED").Do()
+	return err
+}
+
+func getEntryByNumber(srv *sheets.Service, rowNumber int) (string, error) {
+	resp, err := srv.Spreadsheets.Values.Get(spreadsheetID, fmt.Sprintf("A%d:E%d", rowNumber, rowNumber)).Do()
+	if err != nil {
+		return "", fmt.Errorf("failed to get entry: %w", err)
+	}
+
+	if resp == nil || resp.Values == nil || len(resp.Values) == 0 {
+		return "", fmt.Errorf("entry not found")
+	}
+
+	row := resp.Values[0]
+	if len(row) < 5 {
+		return "", fmt.Errorf("invalid entry format")
+	}
+
+	date := fmt.Sprintf("%v", row[1])
+	nominal := fmt.Sprintf("%v", row[2])
+	budget := fmt.Sprintf("%v", row[3])
+	keterangan := fmt.Sprintf("%v", row[4])
+
+	return fmt.Sprintf("📅%s - 💰%s | 🎯%s | 📚%s", date, nominal, budget, keterangan), nil
 }
