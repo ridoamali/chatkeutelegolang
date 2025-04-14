@@ -130,7 +130,8 @@ func handleUpdate(bot *tgbotapi.BotAPI, srv *sheets.Service, update tgbotapi.Upd
 				"📋 Perintah yang tersedia:\n"+
 				"/help - Tampilkan bantuan\n"+
 				"/summary - Tampilkan total pengeluaran\n"+
-				"/last - Tampilkan data terakhir")
+				"/last - Tampilkan data terakhir\n"+
+				"/remove - Hapus entri terakhir")
 			bot.Send(msg)
 			return
 
@@ -143,7 +144,8 @@ func handleUpdate(bot *tgbotapi.BotAPI, srv *sheets.Service, update tgbotapi.Upd
 				"   /start - Mulai bot\n"+
 				"   /help - Tampilkan bantuan ini\n"+
 				"   /summary - Tampilkan total pengeluaran\n"+
-				"   /last - Tampilkan data terakhir\n\n"+
+				"   /last - Tampilkan data terakhir\n"+
+				"   /remove - Hapus entri terakhir\n\n"+
 				"3. Format nominal:\n"+
 				"   - 10rb = 10.000\n"+
 				"   - 1jt = 1.000.000\n"+
@@ -165,6 +167,25 @@ func handleUpdate(bot *tgbotapi.BotAPI, srv *sheets.Service, update tgbotapi.Upd
 				return
 			}
 			msg := tgbotapi.NewMessage(chatId, lastEntry)
+			bot.Send(msg)
+			return
+
+		case "/remove":
+			lastEntry, err := getLastEntry(srv)
+			if err != nil {
+				msg := tgbotapi.NewMessage(chatId, "❌ Gagal mengambil data terakhir")
+				bot.Send(msg)
+				return
+			}
+
+			err = removeLastEntry(srv)
+			if err != nil {
+				msg := tgbotapi.NewMessage(chatId, "❌ Gagal menghapus data terakhir")
+				bot.Send(msg)
+				return
+			}
+
+			msg := tgbotapi.NewMessage(chatId, fmt.Sprintf("✅ Data berhasil dihapus:\n%s", lastEntry))
 			bot.Send(msg)
 			return
 
@@ -305,4 +326,23 @@ func getLastEntry(srv *sheets.Service) (string, error) {
 	keterangan := fmt.Sprintf("%v", lastRow[3])
 
 	return fmt.Sprintf("🕘 Data terakhir: #%s - 💰%s | 🎯%s | 📚%s", rowNum, nominal, budget, keterangan), nil
+}
+
+func removeLastEntry(srv *sheets.Service) error {
+	resp, err := srv.Spreadsheets.Values.Get(spreadsheetID, "A:A").Do()
+	if err != nil {
+		return fmt.Errorf("failed to get row count: %w", err)
+	}
+
+	if resp == nil || resp.Values == nil || len(resp.Values) < 2 {
+		return fmt.Errorf("no entries to remove")
+	}
+
+	lastRow := len(resp.Values)
+	rangeToClear := fmt.Sprintf("A%d:D%d", lastRow, lastRow)
+
+	// Create a clear request
+	clearRequest := &sheets.ClearValuesRequest{}
+	_, err = srv.Spreadsheets.Values.Clear(spreadsheetID, rangeToClear, clearRequest).Do()
+	return err
 }
