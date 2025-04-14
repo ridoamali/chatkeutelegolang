@@ -8,10 +8,8 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/signal"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -21,28 +19,12 @@ import (
 	"google.golang.org/api/sheets/v4"
 )
 
-type ReminderType string
-
-const (
-	Daily   ReminderType = "daily"
-	Weekly  ReminderType = "weekly"
-	Monthly ReminderType = "monthly"
-	None    ReminderType = "none"
-)
-
-type UserPreference struct {
-	ChatID       int64
-	ReminderType ReminderType
-	LastReminder time.Time
-}
-
 var (
 	botToken          string
 	spreadsheetID     string
 	credentialsBase64 string
 	mode              string
-	editingState      = make(map[int64]int)
-	userPreferences   = make(map[int64]UserPreference)
+	editingState      = make(map[int64]int) // Map to store which entry user is editing
 )
 
 func init() {
@@ -64,203 +46,6 @@ func init() {
 	if botToken == "" || spreadsheetID == "" || credentialsBase64 == "" {
 		log.Fatal("One or more required environment variables are not set.")
 	}
-
-	// Load user preferences from spreadsheet
-	loadUserPreferences()
-}
-
-func loadUserPreferences() {
-	ctx := context.Background()
-	srv, err := authorize(ctx)
-	if err != nil {
-		log.Printf("Failed to load user preferences: %v", err)
-		return
-	}
-
-	resp, err := srv.Spreadsheets.Values.Get(spreadsheetID, "Preferences!A:C").Do()
-	if err != nil {
-		log.Printf("Failed to get preferences: %v", err)
-		return
-	}
-
-	if resp != nil && resp.Values != nil {
-		for _, row := range resp.Values[1:] { // Skip header
-			if len(row) >= 3 {
-				chatID, _ := strconv.ParseInt(fmt.Sprintf("%v", row[0]), 10, 64)
-				reminderType := ReminderType(fmt.Sprintf("%v", row[1]))
-				lastReminder, _ := time.Parse("2006-01-02", fmt.Sprintf("%v", row[2]))
-
-				userPreferences[chatID] = UserPreference{
-					ChatID:       chatID,
-					ReminderType: reminderType,
-					LastReminder: lastReminder,
-				}
-			}
-		}
-	}
-}
-
-func saveUserPreference(srv *sheets.Service, pref UserPreference) error {
-	// First, try to find existing preference
-	resp, err := srv.Spreadsheets.Values.Get(spreadsheetID, "Preferences!A:A").Do()
-	if err != nil {
-		return err
-	}
-
-	var rowNum int
-	if resp != nil && resp.Values != nil {
-		for i, row := range resp.Values {
-			if len(row) > 0 && fmt.Sprintf("%v", row[0]) == fmt.Sprintf("%d", pref.ChatID) {
-				rowNum = i + 1
-				break
-			}
-		}
-	}
-
-	// If not found, append new row
-	if rowNum == 0 {
-		rowNum = len(resp.Values) + 1
-	}
-
-	values := [][]interface{}{{
-		pref.ChatID,
-		string(pref.ReminderType),
-		pref.LastReminder.Format("2006-01-02"),
-	}}
-	valueRange := &sheets.ValueRange{Values: values}
-
-	rangeToUpdate := fmt.Sprintf("Preferences!A%d:C%d", rowNum, rowNum)
-	_, err = srv.Spreadsheets.Values.Update(spreadsheetID, rangeToUpdate, valueRange).ValueInputOption("USER_ENTERED").Do()
-	return err
-}
-
-func sendReminder(bot *tgbotapi.BotAPI, srv *sheets.Service, chatID int64, reminderType ReminderType) {
-	var summary string
-	var err error
-
-	switch reminderType {
-	case Daily:
-		summary, err = getDailySummary(srv)
-	case Weekly:
-		summary, err = getWeeklySummary(srv)
-	case Monthly:
-		summary, err = getMonthlySummary(srv)
-	}
-
-	if err != nil {
-		log.Printf("Failed to get summary for reminder: %v", err)
-		return
-	}
-
-	msg := tgbotapi.NewMessage(chatID, fmt.Sprintf("🔔 Pengingat %s:\n\n%s", reminderType, summary))
-	bot.Send(msg)
-
-	// Update last reminder time
-	pref := userPreferences[chatID]
-	pref.LastReminder = time.Now()
-	userPreferences[chatID] = pref
-
-	// Save to spreadsheet
-	ctx := context.Background()
-	srv, err = authorize(ctx)
-	if err != nil {
-		log.Printf("Failed to save reminder time: %v", err)
-		return
-	}
-	saveUserPreference(srv, pref)
-}
-
-func getDailySummary(srv *sheets.Service) (string, error) {
-	today := time.Now().Format("02-01-2006")
-	resp, err := srv.Spreadsheets.Values.Get(spreadsheetID, "A:E").Do()
-	if err != nil {
-		return "", err
-	}
-
-	var total int
-	var entries []string
-
-	for _, row := range resp.Values[1:] {
-		if len(row) < 5 {
-			continue
-		}
-
-		date := fmt.Sprintf("%v", row[1])
-		if date == today {
-			nominal, _ := strconv.Atoi(fmt.Sprintf("%v", row[2]))
-			total += nominal
-			entries = append(entries, fmt.Sprintf("💰%v | 🎯%v | 📚%v", row[2], row[3], row[4]))
-		}
-	}
-
-	if len(entries) == 0 {
-		return "Tidak ada pengeluaran hari ini", nil
-	}
-
-	result := fmt.Sprintf("📊 Pengeluaran Hari Ini (Rp. %d):\n\n", total)
-	for _, entry := range entries {
-		result += entry + "\n"
-	}
-	return result, nil
-}
-
-func startReminderScheduler(bot *tgbotapi.BotAPI, srv *sheets.Service) {
-	// Create a ticker that ticks every minute
-	ticker := time.NewTicker(time.Minute)
-	defer ticker.Stop()
-
-	// Create a channel to handle shutdown
-	done := make(chan bool)
-
-	// Start the scheduler in a separate goroutine
-	go func() {
-		for {
-			select {
-			case <-done:
-				return
-			case t := <-ticker.C:
-				// Check if it's time to send reminders
-				now := t
-				for chatID, pref := range userPreferences {
-					if pref.ReminderType == None {
-						continue
-					}
-
-					var shouldSend bool
-					switch pref.ReminderType {
-					case Daily:
-						// Send at 8 PM every day
-						shouldSend = now.Hour() == 20 && now.Sub(pref.LastReminder) >= 24*time.Hour
-					case Weekly:
-						// Send at 8 PM every Sunday
-						shouldSend = now.Weekday() == time.Sunday && now.Hour() == 20 && now.Sub(pref.LastReminder) >= 7*24*time.Hour
-					case Monthly:
-						// Send at 8 PM on the first day of the month
-						shouldSend = now.Day() == 1 && now.Hour() == 20 && now.Sub(pref.LastReminder) >= 30*24*time.Hour
-					}
-
-					if shouldSend {
-						// Start a new goroutine for each reminder to avoid blocking
-						go func(chatID int64, pref UserPreference) {
-							sendReminder(bot, srv, chatID, pref.ReminderType)
-						}(chatID, pref)
-					}
-				}
-			}
-		}
-	}()
-
-	// Handle graceful shutdown
-	go func() {
-		// Wait for interrupt signal
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-		<-sigChan
-
-		// Cleanup
-		done <- true
-		close(done)
-	}()
 }
 
 func main() {
@@ -275,9 +60,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to authorize with Google Sheets: %v", err)
 	}
-
-	// Start reminder scheduler
-	startReminderScheduler(bot, srv)
 
 	switch mode {
 	case "webhook":
@@ -384,8 +166,7 @@ func handleUpdate(bot *tgbotapi.BotAPI, srv *sheets.Service, update tgbotapi.Upd
 				"/last - Tampilkan data terakhir\n"+
 				"/remove - Hapus entri terakhir\n"+
 				"/edit - Edit entri berdasarkan nomor\n"+
-				"/history - Tampilkan 5 transaksi terakhir\n"+
-				"/reminder - Atur pengingat harian/mingguan")
+				"/history - Tampilkan 5 transaksi terakhir")
 			bot.Send(msg)
 			return
 
@@ -500,24 +281,6 @@ func handleUpdate(bot *tgbotapi.BotAPI, srv *sheets.Service, update tgbotapi.Upd
 				return
 			}
 			msg := tgbotapi.NewMessage(chatId, history)
-			bot.Send(msg)
-			return
-
-		case text == "/reminder":
-			// Create keyboard for reminder options
-			keyboard := tgbotapi.NewInlineKeyboardMarkup(
-				tgbotapi.NewInlineKeyboardRow(
-					tgbotapi.NewInlineKeyboardButton("Harian", tgbotapi.CallbackData("reminder_daily")),
-					tgbotapi.NewInlineKeyboardButton("Mingguan", tgbotapi.CallbackData("reminder_weekly")),
-				),
-				tgbotapi.NewInlineKeyboardRow(
-					tgbotapi.NewInlineKeyboardButton("Bulanan", tgbotapi.CallbackData("reminder_monthly")),
-					tgbotapi.NewInlineKeyboardButton("Matikan", tgbotapi.CallbackData("reminder_none")),
-				),
-			)
-
-			msg := tgbotapi.NewMessage(chatId, "🔔 Pilih jenis pengingat:")
-			msg.ReplyMarkup = keyboard
 			bot.Send(msg)
 			return
 
@@ -863,42 +626,4 @@ func formatRupiah(nominal int) string {
 	}
 
 	return result.String()
-}
-
-func handleCallbackQuery(bot *tgbotapi.BotAPI, srv *sheets.Service, callbackQuery *tgbotapi.CallbackQuery) {
-	chatID := callbackQuery.Message.Chat.ID
-	data := callbackQuery.Data
-
-	if strings.HasPrefix(data, "reminder_") {
-		reminderType := ReminderType(strings.TrimPrefix(data, "reminder_"))
-		
-		// Update user preference
-		pref := UserPreference{
-			ChatID:       chatID,
-			ReminderType: reminderType,
-			LastReminder: time.Now(),
-		}
-		userPreferences[chatID] = pref
-
-		// Save to spreadsheet
-		err := saveUserPreference(srv, pref)
-		if err != nil {
-			bot.Send(tgbotapi.NewMessage(chatID, "❌ Gagal menyimpan pengaturan pengingat"))
-			return
-		}
-
-		var response string
-		switch reminderType {
-		case Daily:
-			response = "✅ Pengingat harian diaktifkan. Kamu akan menerima ringkasan pengeluaran setiap hari."
-		case Weekly:
-			response = "✅ Pengingat mingguan diaktifkan. Kamu akan menerima ringkasan pengeluaran setiap minggu."
-		case Monthly:
-			response = "✅ Pengingat bulanan diaktifkan. Kamu akan menerima ringkasan pengeluaran setiap bulan."
-		case None:
-			response = "✅ Pengingat dimatikan."
-		}
-
-		bot.Send(tgbotapi.NewMessage(chatID, response))
-	}
 }
